@@ -3,8 +3,14 @@ Predictive Maintenance — RUL Predictor
 Streamlit app template for Week 5 capstone deployment.
 
 Students: replace placeholders marked with TODO.
-Run locally: streamlit run streamlit_app.py
-Deploy: push to public GitHub repo, then connect at share.streamlit.io
+This template is designed to run on Streamlit Community Cloud
+(no local installation required).
+
+Repo must contain alongside this file:
+  - rul_model.pkl          (your trained Random Forest from Week 4)
+  - feature_cols.pkl       (your feature column list from Week 4)
+  - sample.csv             (a one-engine sensor history for demos)
+  - requirements.txt       (Python dependencies)
 """
 
 import streamlit as st
@@ -44,7 +50,13 @@ except FileNotFoundError:
 # -------------------------------------------------------------------
 # Helper: build rolling features for an uploaded engine history
 # -------------------------------------------------------------------
-USEFUL_SENSORS = [f"sensor_{i}" for i in [2, 3, 4, 7, 8, 9, 11, 12, 13, 14, 15, 17, 20, 21]]
+# Derive which sensors need rolling features by inspecting the model's feature list.
+# This way, the template works no matter which sensors your specific model used.
+USEFUL_SENSORS = sorted(set(
+    c.replace("_rolling_mean", "").replace("_rolling_std", "")
+    for c in feature_cols
+    if "_rolling_" in c
+))
 
 def add_rolling_features(df: pd.DataFrame, window: int = 5) -> pd.DataFrame:
     """Add rolling mean and std for each useful sensor. Assumes single engine."""
@@ -56,14 +68,29 @@ def add_rolling_features(df: pd.DataFrame, window: int = 5) -> pd.DataFrame:
     return out
 
 # -------------------------------------------------------------------
-# Sidebar — input mode
+# Sidebar — input mode and sample download
 # -------------------------------------------------------------------
 st.sidebar.header("Input")
-mode = st.sidebar.radio("How do you want to provide data?",
-                        ["Upload CSV (full engine history)", "Use sample data"])
+mode = st.sidebar.radio(
+    "How do you want to provide data?",
+    ["Upload CSV (full engine history)", "Use sample data"],
+)
+
+# Sample download button — lets visitors grab the input format
+try:
+    with open("sample.csv", "rb") as _f:
+        st.sidebar.download_button(
+            "📥 Download sample CSV (input format)",
+            _f.read(),
+            "sample.csv",
+            "text/csv",
+            help="Use this as a template for your own input",
+        )
+except FileNotFoundError:
+    pass  # sample.csv not in repo; skip the download button silently
 
 # -------------------------------------------------------------------
-# Main panel
+# Get input data
 # -------------------------------------------------------------------
 df_input = None
 
@@ -73,17 +100,31 @@ if mode == "Upload CSV (full engine history)":
         type=["csv"],
     )
     if uploaded is not None:
-        df_input = pd.read_csv(uploaded)
+        try:
+            df_input = pd.read_csv(uploaded)
+            st.sidebar.success(f"Loaded {len(df_input)} cycles")
+        except Exception as e:
+            st.sidebar.error(f"Could not read CSV: {e}")
+
 elif mode == "Use sample data":
     if st.sidebar.button("Load sample engine"):
-        # TODO: replace with a small CSV in your repo
-        st.info("Add a sample.csv to your repo and load it here.")
+        try:
+            df_input = pd.read_csv("sample.csv")
+            st.sidebar.success(f"Loaded sample with {len(df_input)} cycles")
+        except FileNotFoundError:
+            st.sidebar.error(
+                "sample.csv not found in repo. "
+                "Generate it by running the Task 1 snippet in your Colab notebook, "
+                "then upload to the repo root."
+            )
+        except Exception as e:
+            st.sidebar.error(f"Error loading sample: {e}")
 
 # -------------------------------------------------------------------
 # Predict and display
 # -------------------------------------------------------------------
 if df_input is not None and len(df_input) > 0:
-    st.subheader("Input data preview")
+    st.subheader("Input data preview (last 10 cycles)")
     st.dataframe(df_input.tail(10), use_container_width=True)
 
     # Feature engineering
@@ -95,16 +136,26 @@ if df_input is not None and len(df_input) > 0:
     # Align to model's expected columns
     missing = [c for c in feature_cols if c not in latest.columns]
     if missing:
-        st.error(f"Input is missing features: {missing[:5]}...")
+        st.error(f"Input is missing required features. First few: {missing[:5]}")
+        st.info(
+            "If you uploaded a CSV from a different source, check that column names "
+            "match what the model expects (sensor_1, sensor_2, ..., sensor_21)."
+        )
         st.stop()
 
     X = latest[feature_cols]
     rul_pred = float(model.predict(X)[0])
 
     # ----- prediction display with color -----
-    if rul_pred < 30:
+    # TODO: These threshold values are placeholders. In production they would come
+    # from the maintenance team based on scheduling lead time, cost of unplanned
+    # failure, and operational risk tolerance.
+    CRITICAL_THRESHOLD = 30
+    CAUTION_THRESHOLD = 60
+
+    if rul_pred < CRITICAL_THRESHOLD:
         color, status = "red", "⚠️ CRITICAL — schedule maintenance now"
-    elif rul_pred < 60:
+    elif rul_pred < CAUTION_THRESHOLD:
         color, status = "orange", "🟡 CAUTION — plan maintenance soon"
     else:
         color, status = "green", "✅ HEALTHY — no immediate action"
@@ -127,7 +178,7 @@ if df_input is not None and len(df_input) > 0:
         ax.grid(True, alpha=0.3)
         st.pyplot(fig)
 else:
-    st.info("👈 Upload a CSV or load sample data from the sidebar to get a prediction.")
+    st.info("👈 Use the sidebar to upload a CSV or load sample data.")
 
 # -------------------------------------------------------------------
 # About expander — required for the documentation rubric
@@ -136,17 +187,26 @@ with st.expander("ℹ️ About this model — limitations and honest disclosure"
     st.markdown("""
 **Training data:** NASA C-MAPSS turbofan FD001 (1 operating condition, 1 fault mode, 100 engines).
 
-**Model:** Random Forest regressor with rolling-window features, RUL clipped at 125 cycles.
+**Model:** Random Forest regressor with rolling-window features over 5 cycles,
+RUL labels clipped at 125, trained on 80 engines and validated on 20.
 
-**Validation performance:** RMSE ≈ 20 cycles on held-out engines. This means predictions
-of "60 cycles remaining" could realistically be anywhere from 40 to 80.
+**Validation performance:** RMSE ≈ 20 cycles on held-out engines. This means
+predictions of "60 cycles remaining" could realistically be anywhere from 40 to 80.
+
+**Threshold values (30 cycles for red, 60 cycles for yellow) are placeholders.**
+In production these would come from the maintenance team based on:
+- Scheduling lead time (how long to plan and execute a repair)
+- Cost of unplanned failure (downtime, secondary damage)
+- Operating risk tolerance
 
 **Do NOT use this model for:**
 - Real engines outside the C-MAPSS dataset
-- Different operating conditions than FD001
+- Operating conditions different from FD001
 - Safety-critical maintenance decisions without engineering review
+- Anything that affects life, limb, or significant capital
 
-This is a class project. A production predictive-maintenance system needs continuous
-monitoring, drift detection, retraining, and validation against your specific equipment.
+This is a class project. A production predictive-maintenance system needs
+continuous monitoring, drift detection, retraining against new data, and
+validation against your specific equipment.
     """)
     # TODO: add your name and contact
